@@ -252,12 +252,11 @@ Answer:""")
             llm = get_llm(**kwargs)
             chain = prompt_template | llm | StrOutputParser()
             
-            # Format input with context
-            augmented_input = f"Context:\n{context}\n\nQuestion: {query}"
+            logger.debug(f"RAG context: {context[:500]}...")
+            logger.debug(f"RAG query: {query}")
             
-            logger.debug(f"RAG prompt: {augmented_input[:500]}...")
-            
-            return chain.stream({"input": augmented_input}, config={"callbacks": [self.cb_handler]})
+            # Pass both context and input to the template
+            return chain.stream({"context": context, "input": query}, config={"callbacks": [self.cb_handler]})
             
         except Exception as e:
             logger.error(f"RAG chain error: {e}")
