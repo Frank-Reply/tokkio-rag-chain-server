@@ -24,7 +24,7 @@ from typing import Any, Dict, List, Optional, Sequence, Union
 from uuid import UUID
 
 import flatdict
-from langchain.callbacks.base import BaseCallbackHandler
+from langchain_core.callbacks.base import BaseCallbackHandler
 from langchain_community.callbacks.utils import flatten_dict
 from langchain_core.agents import AgentAction, AgentFinish
 from langchain_core.documents import Document

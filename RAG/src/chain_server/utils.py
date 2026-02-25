@@ -63,7 +63,7 @@ except Exception as e:
     logger.error(f"Llamaindex import failed with error: {e}")
 
 try:
-    from langchain.text_splitter import SentenceTransformersTokenTextSplitter
+    from langchain_text_splitters.sentence_transformers import SentenceTransformersTokenTextSplitter
     from langchain_community.embeddings import HuggingFaceEmbeddings
     from langchain_community.vectorstores import FAISS
 except Exception as e:
@@ -90,7 +90,7 @@ try:
 except Exception as e:
     logger.error(f"faiss import failed with error: {e}")
 
-from langchain.llms.base import LLM
+from langchain_core.language_models.llms import LLM
 from langchain_core.documents.compressor import BaseDocumentCompressor
 from langchain_core.embeddings import Embeddings
 from langchain_core.language_models.chat_models import SimpleChatModel

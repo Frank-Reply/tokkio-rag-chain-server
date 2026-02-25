@@ -13,13 +13,10 @@ from typing import Any, Dict, Generator, List
 from langchain_community.document_loaders import UnstructuredFileLoader
 from langchain_core.output_parsers.string import StrOutputParser
 from langchain_core.prompts.chat import ChatPromptTemplate
-from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain_text_splitters import RecursiveCharacterTextSplitter
 
-# Redis vector store - try community first, fall back to langchain
-try:
-    from langchain_community.vectorstores.redis import Redis as RedisVectorStore
-except ImportError:
-    from langchain.vectorstores.redis import Redis as RedisVectorStore
+# Redis vector store (langchain 1.x: in community)
+from langchain_community.vectorstores.redis import Redis as RedisVectorStore
 
 from RAG.src.chain_server.base import BaseExample
 from RAG.src.chain_server.tracing import langchain_instrumentation_class_wrapper
@@ -48,12 +45,7 @@ def get_llm(**kwargs):
                 streaming=True,
             )
         except ImportError:
-            from langchain.chat_models import ChatOpenAI
-            return ChatOpenAI(
-                model_name=model_name,
-                temperature=0.7,
-                streaming=True,
-            )
+            raise ImportError("OpenAI engine requires langchain-openai. Install with: pip install langchain-openai")
     else:
         # Fall back to NVIDIA's get_llm for nvidia-ai-endpoints
         return nvidia_get_llm(**kwargs)
@@ -66,27 +58,34 @@ prompts = get_prompts()
 document_embedder = get_embedding_model()
 
 # Redis connection settings
-REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379")
-REDIS_INDEX_NAME = os.getenv("REDIS_INDEX_NAME", "tokkio_docs")
+REDIS_URL = os.getenv("REDIS_URL") or "redis://localhost:6379"
+REDIS_INDEX_NAME = os.getenv("REDIS_INDEX_NAME") or "tokkio_docs"
+
+# Schema so Redis stores and returns our metadata (source, filename, doc_id).
+# Without this, similarity_search returns only internal id; source/filename show as "unknown".
+REDIS_INDEX_SCHEMA = {
+    "text": [{"name": "source"}, {"name": "filename"}, {"name": "doc_id"}],
+}
 
 # Initialize vector store
 vectorstore = None
 
 try:
     import redis
-    
+
     logger.info(f"Connecting to Redis at {REDIS_URL.split('@')[1] if '@' in REDIS_URL else REDIS_URL}")
-    
+
     # Test basic connectivity
     test_client = redis.from_url(REDIS_URL)
     test_client.ping()
     logger.info("Redis connection test successful")
-    
-    # Create the vector store
+
+    # Create the vector store (index_schema required for metadata to be returned on search)
     vectorstore = RedisVectorStore(
         redis_url=REDIS_URL,
         index_name=REDIS_INDEX_NAME,
         embedding=document_embedder,
+        index_schema=REDIS_INDEX_SCHEMA,
     )
     logger.info(f"Connected to Redis vector store with index '{REDIS_INDEX_NAME}'")
 except Exception as e:
@@ -134,12 +133,13 @@ class TokkioRAG(BaseExample):
             # Add to Redis
             global vectorstore
             if vectorstore is None:
-                # Create new index
+                # Create new index (same schema so metadata is stored and returned)
                 vectorstore = RedisVectorStore.from_documents(
                     documents,
                     document_embedder,
                     redis_url=REDIS_URL,
                     index_name=REDIS_INDEX_NAME,
+                    index_schema=REDIS_INDEX_SCHEMA,
                 )
             else:
                 vectorstore.add_documents(documents)
@@ -269,23 +269,21 @@ Answer:""")
             return iter([f"I encountered an error while searching: {str(e)}"])
 
     def document_search(self, content: str, num_docs: int) -> List[Dict[str, Any]]:
-        """Search for relevant documents."""
+        """Search for relevant documents. Uses similarity_search_with_score so scores are returned."""
         
         if vectorstore is None:
             return []
         
         try:
-            retriever = vectorstore.as_retriever(search_kwargs={"k": num_docs})
-            docs = retriever.invoke(content)
-            
+            # Use similarity_search_with_score so we get real scores (retriever doesn't set score in metadata)
+            pairs = vectorstore.similarity_search_with_score(content, k=num_docs)
             results = []
-            for doc in docs:
+            for doc, score in pairs:
                 results.append({
                     "source": doc.metadata.get("source", doc.metadata.get("filename", "unknown")),
                     "content": doc.page_content,
-                    "score": doc.metadata.get("score", 0.0),
+                    "score": float(score),
                 })
-            
             return results
             
         except Exception as e:

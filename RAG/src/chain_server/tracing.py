@@ -18,7 +18,7 @@
 import os
 from functools import wraps
 
-from langchain.callbacks.base import BaseCallbackHandler as langchain_base_cb_handler
+from langchain_core.callbacks.base import BaseCallbackHandler as langchain_base_cb_handler
 from llama_index.core.callbacks.simple_llm_handler import SimpleLLMHandler as llama_index_base_cb_handler
 from opentelemetry import context, trace
 from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
