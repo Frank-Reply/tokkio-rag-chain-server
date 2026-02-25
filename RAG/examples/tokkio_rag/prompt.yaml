@@ -13,7 +13,7 @@ rag_template: |
   - If the context doesn't contain relevant information, say so
   - Be concise - keep responses under 100 words unless more detail is needed
   - Don't make up information not in the context
-  - Cite sources when appropriate (e.g., "According to [source]...")
+  - You may refer to the source by name (e.g. "According to the document...") but do NOT include citation codes or markers like "Vgl. doc_0", "doc_0", "(doc_1)" or similar in your answer. Responses may be read aloud by text-to-speech; keep them natural and do not spell out reference codes.
   
   Context:
   {context}

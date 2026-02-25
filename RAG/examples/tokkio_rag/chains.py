@@ -60,6 +60,8 @@ def get_llm(**kwargs):
 
 logger = logging.getLogger(__name__)
 settings = get_config()
+
+
 prompts = get_prompts()
 document_embedder = get_embedding_model()
 
@@ -123,10 +125,11 @@ class TokkioRAG(BaseExample):
             )
             documents = text_splitter.split_documents(raw_documents)
             
-            # Add metadata
-            for doc in documents:
+            # Add metadata with stable doc_id for citations (filename#chunk_index)
+            for idx, doc in enumerate(documents):
                 doc.metadata["source"] = filename
                 doc.metadata["filename"] = filename
+                doc.metadata["doc_id"] = f"{filename}#{idx}"
             
             # Add to Redis
             global vectorstore
@@ -204,22 +207,25 @@ class TokkioRAG(BaseExample):
                 logger.warning("No relevant documents found")
                 return iter(["I couldn't find relevant information in my knowledge base for your question."])
             
-            # Build context from retrieved documents
+            # Build context from retrieved documents (voice-friendly: use source name, never "doc_0")
             context_parts = []
             self._last_citations = []  # Store for citation retrieval
             
             for i, doc in enumerate(docs):
-                source = doc.metadata.get("source", doc.metadata.get("filename", f"doc_{i}"))
+                # Human-readable label for context (avoid doc_0 so TTS doesn't spell it out)
+                source_label = doc.metadata.get("source", doc.metadata.get("filename", "Document"))
+                # Stable ID for citations (traceable to DB: filename#chunk_index from ingest)
+                doc_id = doc.metadata.get("doc_id", source_label)
                 content = doc.page_content
                 score = doc.metadata.get("score", 0.0)
                 
-                context_parts.append(f"[Source: {source}]\n{content}")
+                context_parts.append(f"[Source: {source_label}]\n{content}")
                 
-                # Store citation for Tokkio
+                # Store citation for Tokkio (document_id = stable doc_id, not linear index)
                 self._last_citations.append({
                     "document_type": "text",
-                    "document_id": str(i),
-                    "document_name": source,
+                    "document_id": doc_id,
+                    "document_name": source_label,
                     "content": content,
                     "metadata": str(doc.metadata),
                     "score": score,
