@@ -43,6 +43,8 @@ def get_llm(**kwargs):
                 model=model_name,
                 temperature=0.7,
                 streaming=True,
+                request_timeout=30,
+                max_retries=2,
             )
         except ImportError:
             raise ImportError("OpenAI engine requires langchain-openai. Install with: pip install langchain-openai")
@@ -189,16 +191,11 @@ class TokkioRAG(BaseExample):
             return iter(["I don't have access to a knowledge base. Please upload some documents first."])
         
         try:
-            # Retrieve relevant documents
-            top_k = getattr(settings.retriever, 'top_k', 4)
-            score_threshold = getattr(settings.retriever, 'score_threshold', 0.3)
+            # Retrieve relevant documents (top_k=6 for wider coverage)
+            top_k = getattr(settings.retriever, 'top_k', 6)
             
             retriever = vectorstore.as_retriever(
-                search_type="similarity_score_threshold",
-                search_kwargs={
-                    "score_threshold": score_threshold,
-                    "k": top_k,
-                },
+                search_kwargs={"k": top_k},
             )
             
             docs = retriever.invoke(query)
