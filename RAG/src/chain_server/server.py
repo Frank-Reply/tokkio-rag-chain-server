@@ -284,7 +284,7 @@ async def upload_document(request: Request, file: UploadFile = File(...)) -> JSO
         return JSONResponse(content={"message": "No files provided"}, status_code=200)
 
     try:
-        upload_folder = "/tmp-data/uploaded_files"
+        upload_folder = os.environ.get("UPLOAD_DIR", "/tmp-data/uploaded_files")
         upload_file = os.path.basename(file.filename)
         if not upload_file:
             raise RuntimeError("Error parsing uploaded filename.")

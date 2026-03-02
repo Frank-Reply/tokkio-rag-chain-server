@@ -191,8 +191,8 @@ class TokkioRAG(BaseExample):
             return iter(["I don't have access to a knowledge base. Please upload some documents first."])
         
         try:
-            # Retrieve relevant documents (top_k=6 for wider coverage)
-            top_k = getattr(settings.retriever, 'top_k', 6)
+            # Retrieve relevant documents
+            top_k = getattr(settings.retriever, 'top_k', 4)
             
             retriever = vectorstore.as_retriever(
                 search_kwargs={"k": top_k},

@@ -438,9 +438,16 @@ def get_embedding_model() -> Embeddings:
         else:
             logger.info(f"Using embedding model {settings.embeddings.model_name} hosted at api catalog")
             return NVIDIAEmbeddings(model=settings.embeddings.model_name, truncate="END")
+    elif settings.embeddings.model_engine == "openai":
+        try:
+            from langchain_openai import OpenAIEmbeddings
+        except ImportError:
+            raise ImportError("OpenAI embedding engine requires langchain-openai. Install with: pip install langchain-openai")
+        logger.info(f"Using OpenAI embedding model {settings.embeddings.model_name}")
+        return OpenAIEmbeddings(model=settings.embeddings.model_name)
     else:
         raise RuntimeError(
-            "Unable to find any supported embedding model. Supported engine is huggingface and nvidia-ai-endpoints."
+            "Unable to find any supported embedding model. Supported engines: huggingface, nvidia-ai-endpoints, openai."
         )
 
 
