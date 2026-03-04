@@ -215,7 +215,7 @@ def _ensure_hybrid_table():
             cur.execute(f"""
                 CREATE HYBRID VECTOR INDEX {ORACLE_HYBRID_INDEX}
                 ON {ORACLE_DOCS_TABLE}(content)
-                PARAMETERS('MODEL {ORACLE_ONNX_MODEL} DISTANCE COSINE')
+                PARAMETERS('MODEL {ORACLE_ONNX_MODEL}')
             """)
             conn.commit()
             logger.info(f"Created hybrid vector index {ORACLE_HYBRID_INDEX}")
