@@ -69,7 +69,7 @@ ORACLE_WALLET_PASSWORD = os.getenv("ORACLE_WALLET_PASSWORD", "")
 ORACLE_TABLE_NAME = os.getenv("ORACLE_TABLE_NAME", "RAG_CHUNKS")
 
 # Hybrid search settings
-ORACLE_SEARCH_MODE = os.getenv("ORACLE_SEARCH_MODE", "semantic")  # "semantic" or "hybrid"
+ORACLE_SEARCH_MODE = os.getenv("ORACLE_SEARCH_MODE", "semantic")  # "semantic", "hybrid", or "manual_hybrid"
 ORACLE_DOCS_TABLE = os.getenv("ORACLE_DOCS_TABLE", "RAG_DOCS")
 ORACLE_ONNX_MODEL = os.getenv("ORACLE_ONNX_MODEL", "MULTILINGUAL_E5_BASE")
 ORACLE_HYBRID_INDEX = f"{ORACLE_DOCS_TABLE}_HIDX"
@@ -106,7 +106,7 @@ def _get_oracle_pool():
 
 
 def _ensure_table():
-    """Create the RAG_CHUNKS table and vector index if they don't exist."""
+    """Create the RAG_CHUNKS table, vector index, and (optionally) text index."""
     pool = _get_oracle_pool()
     with pool.acquire() as conn:
         cur = conn.cursor()
@@ -135,6 +135,24 @@ def _ensure_table():
             logger.info(f"Created table {ORACLE_TABLE_NAME} with vector index")
         else:
             logger.info(f"Table {ORACLE_TABLE_NAME} already exists")
+
+        if ORACLE_SEARCH_MODE == "manual_hybrid":
+            text_idx = f"{ORACLE_TABLE_NAME}_TIDX"
+            cur.execute(
+                "SELECT COUNT(*) FROM ctx_user_indexes WHERE idx_name = :1",
+                [text_idx],
+            )
+            if cur.fetchone()[0] == 0:
+                cur.execute(f"""
+                    CREATE INDEX {text_idx}
+                    ON {ORACLE_TABLE_NAME}(content)
+                    INDEXTYPE IS CTXSYS.CONTEXT
+                    PARAMETERS('SYNC (ON COMMIT)')
+                """)
+                conn.commit()
+                logger.info(f"Created Oracle Text index {text_idx} for BM25 search")
+            else:
+                logger.info(f"Oracle Text index {text_idx} already exists")
 
 
 def _oracle_insert_chunks(chunks: List[Tuple[str, str, str, str, list]]):
@@ -179,6 +197,191 @@ def _oracle_search(query_embedding: list, top_k: int = 4) -> List[Dict[str, Any]
                 "score": round(1.0 - row[4], 4),
             })
     return results
+
+
+# ---------------------------------------------------------------------------
+# Manual hybrid search (Path B): OpenAI vector + Oracle Text BM25 + RRF
+# ---------------------------------------------------------------------------
+
+MANUAL_HYBRID_FUSION = os.getenv("ORACLE_FUSION_METHOD", "score")  # "rrf" or "score"
+MANUAL_HYBRID_RRF_K = int(os.getenv("ORACLE_RRF_K", "60"))
+MANUAL_HYBRID_VECTOR_WEIGHT = float(os.getenv("ORACLE_VECTOR_WEIGHT", "0.7"))
+MANUAL_HYBRID_BM25_WEIGHT = float(os.getenv("ORACLE_BM25_WEIGHT", "0.3"))
+
+
+_DE_STOPWORDS = frozenset(
+    "aber alle allem allen aller allerdings alles also am an ander andere anderem "
+    "anderen anderer anderes anderm andern anderr anders auch auf aus bei beim "
+    "bereits besonders bin bis bisher bist bitte da dabei dadurch dafür dagegen "
+    "daher dahin damals damit danach daneben dank dann daran darauf daraus darf "
+    "darfst darin darum darunter das dass davon davor dazu dein deine deinem "
+    "deinen deiner dem den denn dennoch der deren des deshalb dessen dich die "
+    "dies diese dieselbe dieselben diesem diesen dieser dieses dir doch dort "
+    "drei du durch dürfen ein einander eine einem einen einer einige einigem "
+    "einigen einiger einiges einmal er erst erster es etwa etwas euch euer eure "
+    "eurem euren eurer für ganz gar gegen gehen geht genug gerade gering gern "
+    "gerne gibt ging groß große großem großen großer großes gut guten guter "
+    "gutes habe haben hat hatte hätte hätten hier hin hinter ich ihm ihn ihnen "
+    "ihr ihre ihrem ihren ihrer immer immerhin indem infolge innen ins "
+    "irgend ist ja jede jedem jeden jeder jedes jedoch jene jenem jenen jener "
+    "jenes jetzt kann kannst kein keine keinem keinen keiner könne können "
+    "könnt konnte lag lass lassen lässt legt lein machen macht manche manchem "
+    "manchen mancher manches man mehr mein meine meinem meinen meiner mit "
+    "möchte mögen möglich morgen morgens müssen musste nach nachdem nachher "
+    "nächst neben nehmen nein nicht nichts noch nun nur ob oben oder ohne "
+    "schon sehr seid sein seine seinem seinen seiner seit seitdem sich "
+    "sie sind so sofort sogar solch solche solchem solchen solcher soll "
+    "sollen sollte sollten solltest sondern sonst sowie statt über überall "
+    "übrigens uhr um ums und uns unser unsere unserem unseren unserer "
+    "unten viel vielleicht viele vom von vor vorbei vorher warum was weder "
+    "wegen weil weit welch welche welchem welchen welcher wenig wenige "
+    "wenigstens wenn wer werde werden wessen wie wieder will wir wird wirklich "
+    "wo wohl wollen worden wurde würde würden während zeit ziemlich "
+    "zwischen".split()
+)
+
+
+def _oracle_text_search(query: str, top_k: int = 20) -> List[Dict[str, Any]]:
+    """BM25 keyword search using Oracle Text CONTAINS operator."""
+    pool = _get_oracle_pool()
+
+    import re
+    clean = re.sub(r"[{}()\[\]&|!~,;:?*$%<>=\\\"']", " ", query)
+    terms = [t for t in clean.split() if len(t) >= 2 and t.lower() not in _DE_STOPWORDS]
+    if not terms:
+        return []
+    contains_expr = " OR ".join(f"{{{t}}}" for t in terms)
+
+    with pool.acquire() as conn:
+        cur = conn.cursor()
+        cur.execute(f"""
+            SELECT chunk_id, source, filename, content, SCORE(1) AS relevance
+            FROM {ORACLE_TABLE_NAME}
+            WHERE CONTAINS(content, :1, 1) > 0
+            ORDER BY relevance DESC
+            FETCH FIRST :2 ROWS ONLY
+        """, [contains_expr, top_k])
+        results = []
+        for row in cur:
+            results.append({
+                "chunk_id": row[0],
+                "source": row[1],
+                "filename": row[2],
+                "content": row[3],
+                "score": float(row[4]),
+            })
+    return results
+
+
+def _minmax_normalize(results: List[Dict[str, Any]]) -> Dict[str, float]:
+    """Min-max normalize scores to [0, 1]. Returns {chunk_id: normalized_score}."""
+    if not results:
+        return {}
+    scores = [d["score"] for d in results]
+    lo, hi = min(scores), max(scores)
+    spread = hi - lo if hi > lo else 1.0
+    return {d["chunk_id"]: (d["score"] - lo) / spread for d in results}
+
+
+def _fuse_by_score(
+    vector_results: List[Dict[str, Any]],
+    text_results: List[Dict[str, Any]],
+    top_k: int = 4,
+    vector_weight: float = MANUAL_HYBRID_VECTOR_WEIGHT,
+    bm25_weight: float = MANUAL_HYBRID_BM25_WEIGHT,
+) -> List[Dict[str, Any]]:
+    """Normalized score fusion: min-max normalize each list, then weighted sum."""
+    vec_norm = _minmax_normalize(vector_results)
+    bm25_norm = _minmax_normalize(text_results)
+
+    doc_map: Dict[str, Dict[str, Any]] = {}
+    for doc in vector_results:
+        doc_map[doc["chunk_id"]] = doc
+    for doc in text_results:
+        if doc["chunk_id"] not in doc_map:
+            doc_map[doc["chunk_id"]] = doc
+
+    all_ids = set(vec_norm) | set(bm25_norm)
+    fused_scores = {}
+    for cid in all_ids:
+        fused_scores[cid] = (
+            vector_weight * vec_norm.get(cid, 0.0)
+            + bm25_weight * bm25_norm.get(cid, 0.0)
+        )
+
+    ranked = sorted(fused_scores.items(), key=lambda x: x[1], reverse=True)[:top_k]
+    fused = []
+    for cid, score in ranked:
+        doc = doc_map[cid].copy()
+        doc["score"] = round(score, 6)
+        fused.append(doc)
+    return fused
+
+
+def _fuse_by_rrf(
+    vector_results: List[Dict[str, Any]],
+    text_results: List[Dict[str, Any]],
+    top_k: int = 4,
+    k: int = MANUAL_HYBRID_RRF_K,
+    vector_weight: float = MANUAL_HYBRID_VECTOR_WEIGHT,
+    bm25_weight: float = MANUAL_HYBRID_BM25_WEIGHT,
+) -> List[Dict[str, Any]]:
+    """Reciprocal Rank Fusion of vector and text search results."""
+    scores: Dict[str, float] = {}
+    doc_map: Dict[str, Dict[str, Any]] = {}
+
+    for rank, doc in enumerate(vector_results):
+        cid = doc["chunk_id"]
+        scores[cid] = scores.get(cid, 0.0) + vector_weight / (k + rank + 1)
+        doc_map[cid] = doc
+
+    for rank, doc in enumerate(text_results):
+        cid = doc["chunk_id"]
+        scores[cid] = scores.get(cid, 0.0) + bm25_weight / (k + rank + 1)
+        if cid not in doc_map:
+            doc_map[cid] = doc
+
+    ranked = sorted(scores.items(), key=lambda x: x[1], reverse=True)[:top_k]
+    fused = []
+    for cid, fused_score in ranked:
+        doc = doc_map[cid].copy()
+        doc["score"] = round(fused_score, 6)
+        fused.append(doc)
+    return fused
+
+
+def _fuse_results(
+    vector_results: List[Dict[str, Any]],
+    text_results: List[Dict[str, Any]],
+    top_k: int = 4,
+) -> List[Dict[str, Any]]:
+    """Dispatch to the configured fusion method."""
+    if MANUAL_HYBRID_FUSION == "rrf":
+        return _fuse_by_rrf(vector_results, text_results, top_k=top_k)
+    return _fuse_by_score(vector_results, text_results, top_k=top_k)
+
+
+def _oracle_manual_hybrid_search(
+    query: str, query_embedding: list, top_k: int = 4
+) -> List[Dict[str, Any]]:
+    """Path B hybrid: combine OpenAI vector search with Oracle Text BM25 via RRF."""
+    fetch_k = max(top_k * 4, 20)
+
+    vector_results = _oracle_search(query_embedding, top_k=fetch_k)
+
+    try:
+        text_results = _oracle_text_search(query, top_k=fetch_k)
+    except Exception as e:
+        logger.warning(f"BM25 text search failed, falling back to vector-only: {e}")
+        text_results = []
+
+    logger.info(
+        f"Manual hybrid ({MANUAL_HYBRID_FUSION}): {len(vector_results)} vector + "
+        f"{len(text_results)} BM25 results -> top-{top_k}"
+    )
+    if not text_results:
+        return vector_results[:top_k]
+    return _fuse_results(vector_results, text_results, top_k=top_k)
 
 
 # ---------------------------------------------------------------------------
@@ -306,8 +509,11 @@ _vectorstore_ready = False
 try:
     if ORACLE_DB_DSN:
         if ORACLE_SEARCH_MODE == "hybrid":
-            logger.info("Initializing Oracle 26ai in HYBRID search mode")
+            logger.info("Initializing Oracle 26ai in HYBRID search mode (Path A: ONNX)")
             _ensure_hybrid_table()
+        elif ORACLE_SEARCH_MODE == "manual_hybrid":
+            logger.info("Initializing Oracle 26ai in MANUAL HYBRID search mode (Path B: OpenAI + BM25)")
+            _ensure_table()
         else:
             logger.info("Initializing Oracle 26ai in SEMANTIC search mode")
             _ensure_table()
@@ -414,6 +620,9 @@ class TokkioRAG(BaseExample):
 
             if ORACLE_SEARCH_MODE == "hybrid":
                 docs = _oracle_hybrid_search(query, top_k=top_k)
+            elif ORACLE_SEARCH_MODE == "manual_hybrid":
+                query_embedding = document_embedder.embed_query(query)
+                docs = _oracle_manual_hybrid_search(query, query_embedding, top_k=top_k)
             else:
                 query_embedding = document_embedder.embed_query(query)
                 docs = _oracle_search(query_embedding, top_k=top_k)
@@ -485,6 +694,9 @@ Answer:""")
         try:
             if ORACLE_SEARCH_MODE == "hybrid":
                 docs = _oracle_hybrid_search(content, top_k=num_docs)
+            elif ORACLE_SEARCH_MODE == "manual_hybrid":
+                query_embedding = document_embedder.embed_query(content)
+                docs = _oracle_manual_hybrid_search(content, query_embedding, top_k=num_docs)
             else:
                 query_embedding = document_embedder.embed_query(content)
                 docs = _oracle_search(query_embedding, top_k=num_docs)
@@ -524,7 +736,7 @@ Answer:""")
             return False
 
         try:
-            table = ORACLE_DOCS_TABLE if ORACLE_SEARCH_MODE == "hybrid" else ORACLE_TABLE_NAME
+            table = ORACLE_TABLE_NAME if ORACLE_SEARCH_MODE != "hybrid" else ORACLE_DOCS_TABLE
             pool = _get_oracle_pool()
             with pool.acquire() as conn:
                 cur = conn.cursor()
